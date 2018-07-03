@@ -1,6 +1,4 @@
-from eventlet import sleep, GreenPool
-from eventlet.queue import Queue
-import eventlet.greenthread as greenthread
+import asyncio
 
 from .chopper import Chopper
 from .event import EventTimerExpired, EventMessageReceived
@@ -23,31 +21,33 @@ class Peering(object):
     def uptime(self):
         return int(time.time()) - self.start_time
 
-    def run(self):
-        self.input_stream = self.socket.makefile(mode="rb")
-        self.chopper = Chopper(self.input_stream)
-        self.pool = GreenPool()
+    async def run(self):
+        self._shutdown_future = asyncio.get_event_loop().create_future()
+        self.chopper = Chopper(self.socket.reader)
         self.parser = BgpMessageParser()
         self.packer = BgpMessagePacker()
         self.state_machine.open_handler = self.open_handler
-        self.eventlets = []
+        self.tasks = []
 
-        self.eventlets.append(self.pool.spawn(self.send_messages))
-        self.eventlets.append(self.pool.spawn(self.print_route_updates))
-        self.eventlets.append(self.pool.spawn(self.kick_timers))
-        self.eventlets.append(self.pool.spawn(self.receive_messages))
+        self.tasks.append(asyncio.ensure_future(self.send_messages()))
+        self.tasks.append(asyncio.ensure_future(self.print_route_updates()))
+        self.tasks.append(asyncio.ensure_future(self.kick_timers()))
+        self.tasks.append(asyncio.ensure_future(self.receive_messages()))
 
-        self.pool.waitall()
+        await self._shutdown_future
+
+        for task in self.tasks:
+            task.cancel()
+        await self.empty_message_queue()
 
     def open_handler(self, capabilities):
         self.parser.capabilities = capabilities
         self.packer.capabilities = capabilities
 
-    def receive_messages(self):
+    async def receive_messages(self):
         while True:
-            sleep(0)
             try:
-                message_type, serialised_message = self.chopper.next()
+                message_type, serialised_message = await self.chopper.next()
             except SocketClosedError as e:
                 if self.error_handler:
                     self.error_handler("Peering %s: %s" % (self.peer_address, e))
@@ -64,26 +64,24 @@ class Peering(object):
                 self.shutdown()
                 break
 
-    def send_messages(self):
+    async def send_messages(self):
         while True:
-            sleep(0)
-            message = self.state_machine.output_messages.get()
+            message = await self.state_machine.output_messages.get()
             self.socket.send(self.packer.pack(message))
 
-    def empty_message_queue(self):
+    async def empty_message_queue(self):
         while self.state_machine.output_messages.qsize():
-            message = self.state_machine.output_messages.get()
+            message = await self.state_machine.output_messages.get()
             self.socket.send(self.packer.pack(message))
 
-    def print_route_updates(self):
+    async def print_route_updates(self):
         while True:
-            sleep(0)
-            route_update = self.state_machine.route_updates.get()
+            route_update = await self.state_machine.route_updates.get()
             self.route_handler(route_update)
 
-    def kick_timers(self):
+    async def kick_timers(self):
         while True:
-            sleep(1)
+            await asyncio.sleep(1)
             tick = int(time.time())
             try:
                 self.state_machine.event(EventTimerExpired(), tick)
@@ -94,6 +92,5 @@ class Peering(object):
                 break
 
     def shutdown(self):
-        self.empty_message_queue()
-        for eventlet in self.eventlets:
-            eventlet.kill()
+        self._shutdown_future.set_result(0)
+

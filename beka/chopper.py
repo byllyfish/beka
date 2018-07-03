@@ -12,11 +12,11 @@ class Chopper(object):
     def __next__(self):
         return self.next()
 
-    def next(self):
-        header, length, message_type = self.load_header()
+    async def next(self):
+        header, length, message_type = await self.load_header()
         extra_data_length = length - BgpMessage.HEADER_LENGTH
         if extra_data_length > 0:
-            serialised_body = self.input_stream.read(extra_data_length)
+            serialised_body = await self.input_stream.read(extra_data_length)
             if len(serialised_body) < extra_data_length:
                 raise SocketClosedError("Tried to read %d bytes but only got %d" % (extra_data_length, len(header)))
         elif extra_data_length < 0:
@@ -26,9 +26,9 @@ class Chopper(object):
 
         return message_type, serialised_body
 
-    def load_header(self):
+    async def load_header(self):
         # TODO handle when stream runs out
-        header = self.input_stream.read(19)
+        header = await self.input_stream.read(19)
         if len(header) < 19:
             raise SocketClosedError("Tried to read %d bytes but only got %d" % (19, len(header)))
 
