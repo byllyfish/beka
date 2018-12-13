@@ -1,4 +1,4 @@
-from eventlet.queue import Queue
+import asyncio
 from collections import OrderedDict
 
 from .event import Event
@@ -30,8 +30,8 @@ class StateMachine:
         self.open_handler = open_handler
 
         self.keepalive_time = hold_time // 3
-        self.output_messages = Queue()
-        self.route_updates = Queue()
+        self.output_messages = asyncio.Queue()
+        self.route_updates = asyncio.Queue()
         self.routes_to_advertise = []
         self.fourbyteas = False
 
@@ -52,7 +52,7 @@ class StateMachine:
     def handle_shutdown(self):
         if self.state == "open_confirm" or self.state == "established":
             notification_message = BgpNotificationMessage(BgpNotificationMessage.CEASE)
-            self.output_messages.put(notification_message)
+            self.output_messages.put_nowait(notification_message)
         self.shutdown("Shutdown requested")
 
     def shutdown(self, message):
@@ -67,13 +67,13 @@ class StateMachine:
 
     def handle_hold_timer(self):
         notification_message = BgpNotificationMessage(BgpNotificationMessage.HOLD_TIMER_EXPIRED)
-        self.output_messages.put(notification_message)
+        self.output_messages.put_nowait(notification_message)
         self.shutdown("Hold timer expired")
 
     def handle_keepalive_timer(self, tick):
         self.timers["keepalive"].reset(tick)
         message = BgpKeepaliveMessage()
-        self.output_messages.put(message)
+        self.output_messages.put_nowait(message)
 
     def handle_message(self, message, tick):# state machine
         if self.state == "active":
@@ -105,8 +105,8 @@ class StateMachine:
                 capabilities.update(ipv6_capabilities)
             open_message = BgpOpenMessage(4, self.local_as2, self.hold_time, self.router_id, capabilities)
             keepalive_message = BgpKeepaliveMessage()
-            self.output_messages.put(open_message)
-            self.output_messages.put(keepalive_message)
+            self.output_messages.put_nowait(open_message)
+            self.output_messages.put_nowait(keepalive_message)
             self.timers["hold"].reset(tick)
             self.timers["keepalive"].reset(tick)
             self.state = "open_confirm"
@@ -132,7 +132,7 @@ class StateMachine:
             elif isinstance(self.local_address, IP6Address):
                 capabilities.update(ipv6_capabilities)
             keepalive_message = BgpKeepaliveMessage()
-            self.output_messages.put(keepalive_message)
+            self.output_messages.put_nowait(keepalive_message)
             self.timers["hold"].reset(tick)
             self.timers["keepalive"].reset(tick)
             self.state = "open_confirm"
@@ -142,7 +142,7 @@ class StateMachine:
     def handle_message_open_confirm_state(self, message, tick):
         if isinstance(message, BgpKeepaliveMessage):
             for message in self.build_update_messages():
-                self.output_messages.put(message)
+                self.output_messages.put_nowait(message)
             self.timers["hold"].reset(tick)
             self.timers["keepalive"].reset(tick)
             self.state = "established"
@@ -150,12 +150,12 @@ class StateMachine:
             self.shutdown("Notification message received %s" % str(message))
         elif isinstance(message, BgpOpenMessage):
             notification_message = BgpNotificationMessage(BgpNotificationMessage.CEASE)
-            self.output_messages.put(notification_message)
+            self.output_messages.put_nowait(notification_message)
             self.shutdown("Received Open message in OpenConfirm state")
         elif isinstance(message, BgpUpdateMessage):
             notification_message = BgpNotificationMessage(
                 BgpNotificationMessage.FINITE_STATE_MACHINE_ERROR)
-            self.output_messages.put(notification_message)
+            self.output_messages.put_nowait(notification_message)
             self.shutdown("Received Update message in OpenConfirm state")
 
     def handle_message_established_state(self, message, tick):
@@ -167,7 +167,7 @@ class StateMachine:
             self.shutdown("Notification message received %s" % str(message))
         elif isinstance(message, BgpOpenMessage):
             notification_message = BgpNotificationMessage(BgpNotificationMessage.CEASE)
-            self.output_messages.put(notification_message)
+            self.output_messages.put_nowait(notification_message)
             self.shutdown("Received Open message in Established state")
 
     def process_route_update(self, update_message):
@@ -180,7 +180,7 @@ class StateMachine:
                 update_message.path_attributes["as_path"],
                 update_message.path_attributes["origin"]
             )
-            self.route_updates.put(route)
+            self.route_updates.put_nowait(route)
         if "mp_reach_nlri" in update_message.path_attributes:
             for prefix in update_message.path_attributes["mp_reach_nlri"]["nlri"]:
                 route = RouteAddition(
@@ -189,18 +189,18 @@ class StateMachine:
                     update_message.path_attributes["as_path"],
                     update_message.path_attributes["origin"]
                 )
-                self.route_updates.put(route)
+                self.route_updates.put_nowait(route)
         for withdrawal in update_message.withdrawn_routes:
             route = RouteRemoval(
                 withdrawal
             )
-            self.route_updates.put(route)
+            self.route_updates.put_nowait(route)
         if "mp_unreach_nlri" in update_message.path_attributes:
             for withdrawal in update_message.path_attributes["mp_unreach_nlri"]["withdrawn_routes"]:
                 route = RouteRemoval(
                     withdrawal
                 )
-                self.route_updates.put(route)
+                self.route_updates.put_nowait(route)
 
     def build_update_messages(self):
         # TODO handle withdrawals

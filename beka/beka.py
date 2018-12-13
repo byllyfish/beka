@@ -1,6 +1,6 @@
+import asyncio
 from copy import copy
-
-from .stream_server import StreamServer
+from collections import namedtuple
 
 from .state_machine import StateMachine
 from .peering import Peering
@@ -8,6 +8,15 @@ from .route import RouteAddition, RouteRemoval
 from .ip import IPAddress, IPPrefix
 
 DEFAULT_BGP_PORT = 179
+
+
+class MySocket(namedtuple('MySocket', 'reader writer')):
+    def send(self, data):
+        self.writer.write(data)
+
+    def close(self):
+        self.writer.close()
+
 
 class Beka(object):
     def __init__(self, local_address, bgp_port, local_as,
@@ -25,6 +34,7 @@ class Beka(object):
         self.peers = {}
         self.peerings = []
         self.stream_server = None
+        self._shutdown_future = asyncio.get_event_loop().create_future()
         self.routes_to_advertise = []
 
         if not self.bgp_port:
@@ -65,11 +75,17 @@ class Beka(object):
 
         return states
 
-    def run(self):
-        self.stream_server = StreamServer((self.local_address, self.bgp_port), self.handle)
-        self.stream_server.serve_forever()
+    async def run(self):
+        # Under asyncio, shutdown() can be called before run() has even started.
+        self.stream_server = await asyncio.start_server(self.handle, self.local_address, self.bgp_port)
+        await self._shutdown_future
+        self._shutdown_future = asyncio.get_event_loop().create_future()
+        self.stream_server.close()
+        await self.stream_server.wait_closed()
 
-    def handle(self, socket, address):
+    async def handle(self, reader, writer):
+        socket = MySocket(reader, writer)
+        address = writer.get_extra_info('peername')
         peer_ip = address[0]
         if peer_ip not in self.peers:
             if self.error_handler:
@@ -88,12 +104,11 @@ class Beka(object):
         peering = Peering(state_machine, address, socket, self.route_handler, error_handler=self.error_handler)
         self.peerings.append(peering)
         self.peer_up_handler(peer_ip, peer["peer_as"])
-        peering.run()
+        await peering.run()
         self.peer_down_handler(peer_ip, peer["peer_as"])
         self.peerings.remove(peering)
 
     def shutdown(self):
-        if self.stream_server:
-            self.stream_server.stop()
+        self._shutdown_future.set_result(0)
         for peering in self.peerings:
             peering.shutdown()

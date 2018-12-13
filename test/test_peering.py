@@ -1,8 +1,6 @@
-import unittest
+import asynctest
+import asyncio
 from unittest.mock import Mock, patch, call
-
-from eventlet import GreenPool, sleep
-from eventlet.queue import Queue
 
 from beka.peering import Peering
 
@@ -15,10 +13,12 @@ class RouteCatcher(object):
 
 class FakeStateMachine(object):
     def __init__(self):
-        self.output_messages = Queue()
-        self.route_updates = Queue()
+        self.output_messages = asyncio.Queue()
+        self.route_updates = asyncio.Queue()
 
 class FakeSocket(object):
+    reader = None
+
     def __init__(self):
         pass
 
@@ -29,7 +29,7 @@ class FakeChopper(object):
     def __init__(self):
         pass
 
-class PeeringTestCase(unittest.TestCase):
+class PeeringTestCase(asynctest.TestCase):
     def setUp(self):
         self.route_catcher = RouteCatcher()
         self.state_machine = FakeStateMachine()
@@ -41,26 +41,21 @@ class PeeringTestCase(unittest.TestCase):
         )
         self.peering.chopper = FakeChopper()
 
-    def test_print_route_updates(self):
+    async def test_print_route_updates(self):
         fake_route_update = "FAKE ROUTE UPDATE"
-        self.state_machine.route_updates.put(fake_route_update)
-        pool = GreenPool()
-        eventlet = pool.spawn(self.peering.print_route_updates)
+        self.state_machine.route_updates.put_nowait(fake_route_update)
+        task = asyncio.ensure_future(self.peering.print_route_updates())
         for _ in range(10):
-            sleep(0)
+            await asyncio.sleep(0)
             if self.route_catcher.route_updates:
                 break
         self.assertEqual(len(self.route_catcher.route_updates), 1)
         self.assertEqual(self.route_catcher.route_updates[0], fake_route_update)
-        eventlet.kill()
+        task.cancel()
 
-    def test_run_starts_threads(self):
-        with patch("beka.peering.GreenPool") as GreenPool:
-            self.peering.run()
-        GreenPool().spawn.assert_has_calls([
-            call(self.peering.send_messages),
-            call(self.peering.print_route_updates),
-            call(self.peering.kick_timers),
-            call(self.peering.receive_messages),
-        ])
-        GreenPool().waitall.assert_called_once()
+    async def test_run_starts_threads(self):
+        task = asyncio.ensure_future(self.peering.run())
+        await asyncio.sleep(0)
+        self.assertEqual(len(self.peering.tasks), 4)
+        self.peering.shutdown()
+        await task

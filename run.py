@@ -1,8 +1,7 @@
+import asyncio
 import sys
 import yaml
 import signal
-
-from eventlet import GreenPool
 
 from beka.beka import Beka
 
@@ -13,12 +12,12 @@ def printmsg(msg):
 class Server(object):
     def __init__(self):
         self.peering_hosts = []
-        self.greenlets = []
         self.bekas = []
 
-    def run(self):
-        signal.signal(signal.SIGINT, self.signal_handler)
-        pool = GreenPool()
+    async def run(self):
+        loop = asyncio.get_event_loop()
+        loop.add_signal_handler(signal.SIGINT, self.signal_handler)
+        tasks = []
 
         with open("beka.yaml") as file:
             config = yaml.load(file.read())
@@ -47,11 +46,12 @@ class Server(object):
                         route["next_hop"]
                     )
             self.bekas.append(beka)
-            pool.spawn_n(beka.run)
-        pool.waitall()
-        printmsg("All greenlets gone, exiting")
+            tasks.append(asyncio.ensure_future(beka.run()))
 
-    def signal_handler(self, _signal, _frame):
+        await asyncio.wait(tasks)
+        printmsg("All tasks gone, exiting")
+
+    def signal_handler(self):
         printmsg("[SIGINT] Shutting down")
         self.shutdown()
 
@@ -77,4 +77,4 @@ class Server(object):
 
 if __name__ == "__main__":
     server = Server()
-    server.run()
+    asyncio.get_event_loop().run_until_complete(server.run())
